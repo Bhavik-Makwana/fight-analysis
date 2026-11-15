@@ -90,7 +90,10 @@ uv run python analyze.py --labels <workdir>/labels/r{1,2,3}_events_corrected.jso
 ```
 
 Add `--placeholder` to `analyze.py`, `make_strips.py`, `make_review.py` or `make_clinch_review.py`
-to draw mannequins instead of real footage, for sharing or demos.
+to draw mannequins instead of real footage, for sharing or demos. `docs/make_screenshots.py`
+regenerates every image in this README that way. It builds a placeholder-only demo workdir from a
+fight, renders the overlay and a labelling sheet, and screenshots the UI and review pages with
+headless Chrome.
 
 ## The fight config
 
@@ -168,6 +171,7 @@ and in our test the model's control calls were close to random.
 - **`web/`:** the pipeline UI (stdlib HTTP server + one HTML page)
 - **`tests/test_label_strips.py`:** both labelling backends checked against a local fake API server
   (no key, no network)
+- **`docs/`:** README images and `make_screenshots.py`, which regenerates them
 - **`configs/`:** example fight config
 - **`private/`:** git-ignored. Fight data, labels, reviews and renders.
 
