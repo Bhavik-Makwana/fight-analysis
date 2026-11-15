@@ -1,0 +1,18 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Model weights (ultralytics downloads these on first run)
+*.pt
+
+# PRIVATE: all fight data - video, pose caches, renders, labels, review pages and
+# human review answers. Never commit to this (public) repo. It is its own private repo.
+/private/
+*.mp4

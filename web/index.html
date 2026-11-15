@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>fight-analysis pipeline</title>
+<style>
+:root { --bg:#111214; --panel:#1b1c20; --line:#2a2b31; --text:#ddd; --mute:#8a8a92; --ok:#3cff8c; --warn:#ffc04d; --bad:#ff5a46; --link:#7fb8ff; }
+* { box-sizing:border-box; }
+body { background:var(--bg); color:var(--text); font:14px/1.45 -apple-system, system-ui, sans-serif; margin:0; }
+header { display:flex; align-items:baseline; gap:16px; padding:18px 24px; border-bottom:1px solid var(--line); }
+header h1 { font-size:18px; margin:0; }
+header .mute { color:var(--mute); font-size:13px; }
+main { display:grid; grid-template-columns:minmax(520px, 1.1fr) minmax(420px, 1fr); gap:20px; padding:20px 24px; }
+h2 { font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:var(--mute); margin:0 0 10px; font-weight:600; }
+.panel { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:14px 16px; margin-bottom:16px; }
+.step { display:grid; grid-template-columns:28px 1fr auto; gap:10px; align-items:start; padding:12px 0; border-top:1px solid var(--line); }
+.step:first-of-type { border-top:0; }
+.num { width:24px; height:24px; border-radius:50%; background:#2a2b31; display:grid; place-items:center; font-size:12px; color:var(--mute); }
+.num.done { background:#1f4d33; color:var(--ok); }
+.title { font-weight:600; }
+.desc { color:var(--mute); font-size:12.5px; margin:2px 0 6px; }
+.params { display:flex; flex-wrap:wrap; gap:6px 12px; font-size:12.5px; color:#bbb; }
+.params input[type=text], .params select { background:#121214; color:var(--text); border:1px solid #333; border-radius:4px; padding:3px 6px; font-size:12.5px; }
+.params input[type=text] { width:150px; }
+button { background:#2b2d33; color:var(--text); border:1px solid #3a3c43; border-radius:6px; padding:6px 12px; cursor:pointer; font-size:13px; }
+button:hover { border-color:#555; }
+button.primary { background:var(--ok); color:#111; border-color:var(--ok); font-weight:600; }
+.chips { display:flex; gap:4px; flex-wrap:wrap; margin-top:4px; }
+.chip { font-size:11px; padding:1px 7px; border-radius:10px; background:#24252a; color:var(--mute); }
+.chip.ok { background:#173826; color:var(--ok); }
+#log { background:#0b0b0c; border:1px solid var(--line); border-radius:6px; height:260px; overflow:auto; font:12px/1.4 ui-monospace, Menlo, monospace; padding:8px 10px; white-space:pre-wrap; color:#c8c8c8; }
+.jobs { display:flex; flex-direction:column; gap:4px; margin-bottom:8px; max-height:140px; overflow:auto; }
+.job { display:flex; justify-content:space-between; font-size:12.5px; padding:3px 6px; border-radius:4px; cursor:pointer; }
+.job:hover, .job.sel { background:#24252a; }
+.st-running { color:var(--warn); } .st-done { color:var(--ok); } .st-queued { color:var(--mute); } .st-failed, .st-cancelled { color:var(--bad); }
+table { width:100%; border-collapse:collapse; font-size:13px; }
+th, td { text-align:right; padding:4px 6px; border-bottom:1px solid var(--line); }
+th:first-child, td:first-child { text-align:left; }
+th { color:var(--mute); font-weight:500; }
+a { color:var(--link); }
+textarea#cfg { width:100%; height:300px; background:#0b0b0c; color:#ddd; border:1px solid var(--line); border-radius:6px; font:12px/1.4 ui-monospace, Menlo, monospace; padding:8px; }
+video { width:100%; border-radius:6px; background:#000; margin-top:8px; }
+details summary { cursor:pointer; color:var(--mute); }
+.row { display:flex; justify-content:space-between; align-items:center; padding:5px 0; border-bottom:1px solid var(--line); font-size:13px; }
+.win { font-weight:600; }
+</style></head>
+<body>
+<header><h1>fight-analysis</h1><span class="mute" id="cfgpath"></span><span class="mute" id="fighters"></span></header>
+<main>
+<section>
+  <div class="panel">
+    <details><summary>Fight config</summary>
+      <p class="desc">Video source and trim, camera framing, rounds (seconds in the prepared clip), fighters and their colour signatures. Saved to the config file.</p>
+      <textarea id="cfg" spellcheck="false"></textarea>
+      <div style="margin-top:8px"><button onclick="saveCfg()">Save config</button> <span id="cfgmsg" class="mute"></span></div>
+    </details>
+  </div>
+  <div class="panel"><h2>Pipeline</h2><div id="steps"></div></div>
+</section>
+<section>
+  <div class="panel"><h2>Jobs</h2><div class="jobs" id="jobs"></div><div id="log">Run a step to see its output here.</div></div>
+  <div class="panel"><h2>Reviews</h2><div id="reviews" class="mute">No review pages yet: run steps 6 and 7.</div></div>
+  <div class="panel"><h2>Results</h2><div id="results" class="mute">Run step 2 or 9 to get per-round stats.</div></div>
+  <div class="panel"><h2>Videos</h2><div id="videos" class="mute">Rendered overlays appear here.</div></div>
+</section>
+</main>
+<script>
+const STEPS = [
+  {id:'prepare', title:'Prepare the clip', desc:'Local file or URL from the config, trimmed and re-encoded to 30 fps.', done:s=>s.have.video,
+   params:[{k:'force', type:'check', label:'rebuild'}]},
+  {id:'track', title:'Track poses', desc:'YOLO pose + ByteTrack over every frame. The slow step: run once.', done:s=>s.have.tracks},
+  {id:'analyze', title:'Analyse (pose only)', desc:'Fighter identity from the colour signatures, falls, pressure, pose strike detector. Writes the keypoints the later steps use.', done:s=>s.have.keypoints},
+  {id:'strips', title:'Labelling sheets', desc:'Overlapping 1.6 s windows as 4×4 frame sheets per round.', done:s=>s.have.strips.every(x=>x), chips:s=>s.have.strips,
+   params:[{k:'rounds', type:'text', label:'rounds', ph:'all, or 1,2'}]},
+  {id:'label', title:'Label with a vision model', desc:'Sends the sheets to any vision model API. Needs the provider\'s key in the server\'s environment.',
+   params:[{k:'provider', type:'select', opts:['anthropic','openai','gemini','openrouter','ollama','compatible']},
+           {k:'model', type:'text', label:'model', ph:'default: claude-opus-5-5'},
+           {k:'effort', type:'select', opts:['','low','medium','high','xhigh','max'], label:'effort'},
+           {k:'base_url', type:'text', label:'base url', ph:'compatible only'},
+           {k:'api_key_env', type:'text', label:'key env', ph:'compatible only'},
+           {k:'json_mode', type:'select', opts:['','schema','object','prompt'], label:'json'},
+           {k:'windows', type:'text', label:'windows', ph:'e.g. 0:12 to try'},
+           {k:'rounds', type:'text', label:'rounds', ph:'all'}]},
+  {id:'merge', title:'Merge labels', desc:'Deduplicate the overlapping windows and map labels to frames. Pick an API run, and tick "use as main labels" to make it the labels everything else reads.',
+   done:s=>s.have.labels.every(x=>x), chips:s=>s.have.labels,
+   params:[{k:'labels_dir', type:'runs', label:'source'}, {k:'promote', type:'check', label:'use as main labels'}, {k:'rounds', type:'text', label:'rounds', ph:'all'}]},
+  {id:'review', title:'Review strikes', desc:'Clips of the strikes worth a human look. Top-weighted first; then a random sample of "unclear" ones to calibrate.',
+   params:[{k:'name', type:'text', label:'name', ph:'v1'}, {k:'random', type:'check', label:'random unclear sample'},
+           {k:'exclude', type:'text', label:'exclude review', ph:'e.g. v1'}, {k:'placeholder', type:'check', label:'placeholder'}]},
+  {id:'clinch_review', title:'Review clinches', desc:'The longest clinches: who controlled each one?',
+   params:[{k:'name', type:'text', label:'name', ph:'v1'}, {k:'placeholder', type:'check', label:'placeholder'}]},
+  {id:'apply', title:'Apply reviews', desc:'Fix the reviewed strikes and calibrate P(landed) for the rest from your answers.',
+   done:s=>s.have.corrected.every(x=>x), chips:s=>s.have.corrected},
+  {id:'render', title:'Render the overlay', desc:'Final stats and the annotated video, from the corrected labels and the clinch review.',
+   params:[{k:'out', type:'text', label:'file', ph:'final.mp4'}, {k:'range', type:'text', label:'range', ph:'start:end s'},
+           {k:'placeholder', type:'check', label:'placeholder'}]},
+];
+let S = null, selJob = null;
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+function paramHtml(step, p) {
+  const id = `${step.id}-${p.k}`;
+  if (p.type === 'check') return `<label><input type="checkbox" id="${id}"> ${p.label}</label>`;
+  if (p.type === 'select') return `<label>${p.label || ''} <select id="${id}">${p.opts.map(o => `<option>${o}</option>`).join('')}</select></label>`;
+  if (p.type === 'runs') return `<label>${p.label} <select id="${id}"><option value="">main labels (labels/out)</option>${(S?.api_runs||[]).map(o => `<option>${esc(o)}</option>`).join('')}</select></label>`;
+  return `<label>${p.label} <input type="text" id="${id}" placeholder="${p.ph || ''}"></label>`;
+}
+function renderSteps() {
+  $('steps').innerHTML = STEPS.map((st, i) => {
+    const done = S && st.done ? st.done(S) : false;
+    const chips = S && st.chips ? `<div class="chips">${st.chips(S).map((x, r) => `<span class="chip ${x ? 'ok' : ''}">R${r + 1}</span>`).join('')}</div>` : '';
+    return `<div class="step"><div class="num ${done ? 'done' : ''}">${i}</div>
+      <div><div class="title">${st.title}</div><div class="desc">${st.desc}</div>
+      <div class="params">${(st.params || []).map(p => paramHtml(st, p)).join('')}</div>${chips}</div>
+      <div><button class="primary" onclick="run('${st.id}')">Run</button></div></div>`;
+  }).join('');
+}
+async function run(stepId) {
+  const st = STEPS.find(s => s.id === stepId), params = {};
+  for (const p of st.params || []) {
+    const el = $(`${stepId}-${p.k}`); if (!el) continue;
+    const v = p.type === 'check' ? el.checked : el.value.trim();
+    if (v === '' || v === false) continue;
+    params[p.k] = p.k === 'rounds' ? v.split(',').map(x => x.trim()).filter(Boolean) : v;
+  }
+  const r = await fetch('/api/run', {method:'POST', body:JSON.stringify({step:stepId, params})});
+  const j = await r.json();
+  if (j.error) { $('log').textContent = 'Error: ' + j.error; return; }
+  selJob = j.id; refresh();
+}
+async function refresh() {
+  S = await (await fetch('/api/state')).json();
+  $('cfgpath').textContent = S.config_path + ' → ' + S.workdir;
+  $('fighters').textContent = S.names.join(' vs ') + ` · ${S.rounds.length} rounds`;
+  const rkey = S.api_runs.join('|');
+  if (!$('steps').dataset.init || $('steps').dataset.runs !== rkey) {
+    renderSteps(); $('steps').dataset.init = 1; $('steps').dataset.runs = rkey;
+  } else updateDone();
+  $('jobs').innerHTML = S.jobs.map(j => `<div class="job ${j.id === selJob ? 'sel' : ''}" onclick="selJob='${j.id}';pollLog()">
+     <span>${j.step}</span><span class="st-${j.status.split(' ')[0]}">${j.status}</span></div>`).join('') || '<span class="mute">No jobs yet.</span>';
+  if (S.reviews.length) $('reviews').innerHTML = S.reviews.map(r => `<div class="row"><span><a href="${r.url}" target="_blank">${r.name}</a> <span class="mute">${r.kind}</span></span>
+     <span class="chip ${r.answers ? 'ok' : ''}">${r.answers ? 'answers saved' : 'not answered'}</span></div>`).join('');
+  if (S.stats) {
+    const [a, b] = S.names;
+    $('results').innerHTML = `<table><tr><th>Round</th><th>${a} landed</th><th>${b} landed</th><th>${a} body</th><th>${b} body</th><th>weighted</th></tr>` +
+      S.stats.rounds.map((r, i) => { const w = S.stats.weighted[i], win = Math.abs(w[a] - w[b]) < 1 ? 'even' : (w[a] > w[b] ? a : b);
+        return `<tr><td>R${r.round}</td><td>${r[a].landed}</td><td>${r[b].landed}</td><td>${r[a].landed_by_target.body}</td><td>${r[b].landed_by_target.body}</td>
+        <td>${w[a]} – ${w[b]} <span class="win">${win}</span></td></tr>`; }).join('') + '</table>';
+  }
+  const vkey = S.videos.join('|');
+  if (S.videos.length && $('videos').dataset.key !== vkey) {  // only rebuild when the list changes
+    $('videos').dataset.key = vkey;
+    $('videos').innerHTML = `<select id="vsel" onchange="$('vplayer').poster='/files/'+this.value.replace(/\.mp4$/,'.jpg');$('vplayer').src='/files/'+this.value">${S.videos.map(v => `<option>${esc(v)}</option>`).join('')}</select>
+     <video id="vplayer" controls preload="none" poster="/files/${S.videos[0].replace(/\.mp4$/, '.jpg')}" src="/files/${S.videos[0]}"></video>`;
+  }
+  if (!selJob && S.jobs.length) selJob = S.jobs[0].id;  // show the latest job by default
+  if (selJob) pollLog();
+}
+function updateDone() {
+  const nums = document.querySelectorAll('.step .num');
+  STEPS.forEach((st, i) => nums[i].classList.toggle('done', !!(st.done && st.done(S))));
+}
+async function pollLog() {
+  if (!selJob) return;
+  const j = await (await fetch('/api/job/' + selJob)).json();
+  const el = $('log'), atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 20;
+  el.textContent = (j.log || []).join('\n') || `(${j.status})`;
+  if (atBottom) el.scrollTop = el.scrollHeight;
+}
+async function loadCfg() { $('cfg').value = (await (await fetch('/api/config')).json()).text; }
+async function saveCfg() {
+  const r = await (await fetch('/api/config', {method:'POST', body:JSON.stringify({text:$('cfg').value})})).json();
+  $('cfgmsg').textContent = r.error || 'Saved.'; if (!r.error) { $('steps').dataset.init = ''; refresh(); }
+}
+loadCfg(); refresh();
+setInterval(() => { refresh(); }, 2500);
+</script>
+</body></html>

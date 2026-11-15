@@ -1,0 +1,31 @@
+{
+  "name": "my-bout",
+  "workdir": "private/my-bout",
+  "sport": "Muay Thai",
+  "video": {
+    "source": "path/to/full-event.mp4",
+    "start": "0:42:10",
+    "end": "0:51:30",
+    "timecode_offset": null
+  },
+  "camera": "single fixed camera, elevated about three-quarters of the way up, looking down across the ring from one side",
+  "rounds": [[5.0, 125.0], [185.0, 305.0], [365.0, 485.0]],
+  "fighters": [
+    {
+      "id": "RED",
+      "description": "red shorts, bare torso, short dark hair, black shin guards",
+      "draw_bgr": [70, 90, 255],
+      "torso": [{"h": [0, 8], "s": [110, 255], "v": [60, 255]}, {"h": [170, 179], "s": [110, 255], "v": [60, 255]}],
+      "legs": [{"h": [0, 179], "s": [0, 255], "v": [0, 50]}]
+    },
+    {
+      "id": "BLUE",
+      "description": "blue shorts, white rash guard, shaved head, white shin guards",
+      "draw_bgr": [255, 160, 60],
+      "torso": [{"h": [0, 179], "s": [0, 50], "v": [150, 255]}],
+      "legs": [{"h": [0, 179], "s": [0, 50], "v": [170, 255]}]
+    }
+  ],
+  "ignore": "The referee wears all black. Ignore the referee, corner teams and spectators.",
+  "official_result": null
+}
