@@ -17,10 +17,15 @@ A fight config is a JSON file (see configs/example.fight.json):
     {"id": "RED", "description": "red shorts, ...",
      "draw_bgr": [70, 90, 255],                      # overlay colour
      "torso": [{"h": [0, 8], "s": [110, 255], "v": [60, 255]}],   # OpenCV HSV ranges (H 0-179)
+     "shorts": [...],                                # optional, hips/thighs (bare-chested fighters)
      "legs":  [...],                                 # optional, e.g. shin guards
-     "weights": {"torso": 1.0, "legs": 1.5, "other_torso": 1.0}}, # optional identity scoring
+     "weights": {"torso": 1.0, "shorts": 1.5, "legs": 1.5,        # optional identity scoring
+                 "other_torso": 1.0, "other_shorts": 1.0}},
     ...
   ],
+  "ring": {"polygon": [[x, y], ...], "margin": 15},  # optional: canvas outline in clip pixels;
+                                                     #   only people with feet inside can be fighters
+                                                     #   (for a fixed camera; keeps corner teams out)
   "ignore": "The referee wears all black ...",       # people the labeller should ignore
   "official_result": "RED by decision"               # optional, shown on the final card
 }
@@ -88,7 +93,8 @@ class FightConfig:
 
     def appearance_key(self):
         """Hash of the colour signatures, so cached colour features are rebuilt when they change."""
-        sig = json.dumps([{k: f.get(k) for k in ("id", "torso", "legs")} for f in self.fighters],
+        keys = ("id", "torso", "legs", "shorts")
+        sig = json.dumps([{k: f.get(k) for k in keys if k in f or k != "shorts"} for f in self.fighters],
                          sort_keys=True)
         return hashlib.sha1(sig.encode()).hexdigest()[:8]
 

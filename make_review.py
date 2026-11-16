@@ -79,7 +79,7 @@ for r in range(1, len(cfg.rounds) + 1):
             first += [e for e in mine if cat(e) == c][:1]
         queues[n] = first + [e for e in mine if e not in first]
     kept, quota = [], {n: args.per_round // 2 for n in A.NAMES}
-    while any(quota.values()) and any(queues.values()):
+    while any(quota[n] and queues[n] for n in A.NAMES):  # stop when no fighter can add more
         for n in A.NAMES:  # alternate fighters; skip candidates within 1.5 s of a kept clip
             while quota[n] and queues[n]:
                 e = queues[n].pop(0)

@@ -36,6 +36,8 @@ ROUNDS = []         # [(start_s, end_s), ...] in the prepared clip
 NAMES = ("A", "B")  # the two fighter ids
 F0, F1 = NAMES
 COL = {}            # fighter id -> BGR overlay colour
+CHOSEN_IDS = {}     # fighter id -> per-frame track id picked by assign_fighters (for track_report)
+FRAME_W = 0         # clip width in pixels (set in main)
 
 
 def configure(cfg):
@@ -167,7 +169,8 @@ def hsv_fraction(px, ranges):
 
 def appearance(video, frames, cache):
     """Score each detection against every fighter's colour signature, from its box
-    (robust to side-on poses): the config's `torso` ranges on the upper body and
+    (robust to side-on poses): the config's `torso` ranges on the upper body, `shorts`
+    ranges on the hips/thighs (the useful one when both fighters are bare-chested) and
     `legs` ranges (e.g. shin guards) on the lower legs."""
     try:
         return pickle.load(open(cache, "rb"))
@@ -193,6 +196,7 @@ def appearance(video, frames, cache):
                 return hsv[c:d, a:b].reshape(-1, 3)
 
             up, lo = crop(0.3, 0.18, 0.7, 0.45), crop(0.15, 0.72, 0.85, 0.95)
+            mid = crop(0.25, 0.44, 0.75, 0.62)
             if len(up) < 10:
                 row.append(None)
                 continue
@@ -200,13 +204,30 @@ def appearance(video, frames, cache):
                 "torso": {f["id"]: hsv_fraction(up, f.get("torso")) for f in CFG.fighters},
                 "legs": {f["id"]: hsv_fraction(lo, f.get("legs")) if len(lo) >= 10 else 0.0
                          for f in CFG.fighters},
+                "shorts": {f["id"]: hsv_fraction(mid, f.get("shorts")) if len(mid) >= 10 else 0.0
+                           for f in CFG.fighters},
                 "h": float(bh)})
         feats.append(row)
     pickle.dump(feats, open(cache, "wb"))
     return feats
 
 
-def assign_fighters(frames, feats):
+def track_label_fn(labels, fps=30.0):
+    """labels: {"<track id>": "FIGHTER" | "ignore" | [["FIGHTER"|"ignore", from_s, to_s], ...]}
+    (from make_track_sheet.py). Returns f(track_id, frame) -> label or None."""
+    def f(tid, t):
+        v = labels.get(str(tid))
+        if v is None or isinstance(v, str):
+            return v
+        sec = t / fps
+        for lab, a, b in v:
+            if a <= sec <= b:
+                return lab
+        return None
+    return f
+
+
+def assign_fighters(frames, feats, track_labels=None):
     """Pick the two fighters per frame by jointly scoring every candidate pair on
     colour signature, apparent size, tracker-ID continuity and distance moved."""
     F = len(frames)
@@ -214,7 +235,8 @@ def assign_fighters(frames, feats):
         for p, f in zip(fr, fs):
             p["app"] = f
 
-    weights = {f["id"]: {"torso": 1.0, "legs": 1.5, "other_torso": 1.0, **f.get("weights", {})}
+    weights = {f["id"]: {"torso": 1.0, "legs": 1.5, "shorts": 1.5, "other_torso": 1.0, "other_shorts": 1.0,
+                         **f.get("weights", {})}
                for f in CFG.fighters}
 
     def colour(p):
@@ -222,11 +244,14 @@ def assign_fighters(frames, feats):
         if p["app"] is None:
             return 0.0, 0.0
         t, l = p["app"]["torso"], p["app"]["legs"]
+        sh = p["app"].get("shorts", {n: 0.0 for n in NAMES})
         out = []
         for n in NAMES:
             w = weights[n]
-            other = sum(t[m] for m in NAMES if m != n)
-            out.append(w["torso"] * t[n] + w["legs"] * l[n] - w["other_torso"] * other)
+            other_t = sum(t[m] for m in NAMES if m != n)
+            other_s = sum(sh[m] for m in NAMES if m != n)
+            out.append(w["torso"] * t[n] + w["legs"] * l[n] + w["shorts"] * sh[n]
+                       - w["other_torso"] * other_t - w["other_shorts"] * other_s)
         return tuple(out)
 
     # track-level colour averages smooth out bad single frames
@@ -241,14 +266,33 @@ def assign_fighters(frames, feats):
         b = p["box"]
         return np.array([(b[0] + b[2]) / 2, (b[1] + b[3]) / 2])
 
+    ring = (CFG.data.get("ring") or {})
+    ring_poly = np.array(ring["polygon"], np.float32) if ring.get("polygon") else None
+    ring_margin = float(ring.get("margin", 15))
+
+    def in_ring(p):
+        """Optional: only people whose feet are on the canvas (config `ring.polygon`, clip pixels)
+        can be fighters - keeps corner teams and front-row spectators out."""
+        if ring_poly is None:
+            return True
+        x1, y1, x2, y2 = p["box"]
+        return cv2.pointPolygonTest(ring_poly, (float((x1 + x2) / 2), float(y2)), True) > -ring_margin
+
+    tlab = track_label_fn(track_labels or {})
+    global CHOSEN_IDS
+    CHOSEN_IDS = {n: np.full(F, -1, int) for n in NAMES}  # which track each fighter came from, per frame
     K = {n: np.full((F, 17, 3), np.nan) for n in NAMES}
     last = {n: None for n in NAMES}  # (id, centre, frame, height)
     heights = [180.0]
     for i, fr in enumerate(frames):
         ref_h = float(np.median(heights[-90:]))
-        cands = [p for p in fr if (p["box"][3] - p["box"][1]) >= 0.6 * ref_h]
+        cands = [p for p in fr if (p["box"][3] - p["box"][1]) >= 0.6 * ref_h and in_ring(p)
+                 and tlab(p["id"], i) != "ignore"]
 
         def fscore(p, n):
+            lab = tlab(p["id"], i)
+            if lab is not None:  # a human-labelled track decides it
+                return 10.0 if lab == n else -1.0
             c = colour(p)
             tc = tcol.get(p["id"], c)
             col = 0.5 * (c[0] + tc[0]) if n == F0 else 0.5 * (c[1] + tc[1])
@@ -287,6 +331,7 @@ def assign_fighters(frames, feats):
             p = cands[idx]
             h = p["box"][3] - p["box"][1]
             K[n][i] = p["kpts"]
+            CHOSEN_IDS[n][i] = p["id"]
             last[n] = (p["id"], centre(p), i, h)
             heights.append(h)
     for n in NAMES:
@@ -463,6 +508,7 @@ def detect_strikes(A, D, an, fps, F, clinch):
 
 CLINCH_DIST = 1.2   # torso centres within this many torso-lengths
 CLINCH_MIN_S = 1.0  # a tie-up must last this long to count as a clinch
+MERGE_DIST = 0.8    # torso centres this close just before one fighter vanishes = pose merge, not a fall
 
 
 def clinch_and_pressure(B, fps, F):
@@ -519,7 +565,10 @@ def detect_falls(B, strikes, clinch, dist, fps, F):
         feet = np.nanmax(A.K[:, [L_AN, R_AN], 1], axis=1)
         leg = (feet - A.hip[:, 1]) / A.s
         head_low = (A.head[:, 1] - A.hip[:, 1]) / A.s > -0.25
-        m = ((leg < 0.65) | head_low) & A.present
+        # hips at foot level = on the canvas anywhere; head at hip height only counts when the
+        # fighters are apart (bent over in a clinch is not down)
+        apart = np.nan_to_num(dist, nan=9.0) > 1.5 * MERGE_DIST
+        m = ((leg < 0.65) | (head_low & apart)) & A.present
         rr = [tuple(r) for r in runs(m, min_len=6, merge_gap=5)]
         upright = (A.hip[:, 1] - A.neck[:, 1]) / A.s  # ~1.0 standing, small when crouched/lying
         xs, ys = A.K[:, :, 0], A.K[:, :, 1]
@@ -528,6 +577,19 @@ def detect_falls(B, strikes, clinch, dist, fps, F):
         for g0, g1 in runs(~A.present, min_len=12):
             if g1 - g0 > 5 * fps or g0 < 10 or g1 >= F - 6 or in_round(g0, fps) is None:
                 continue
+            # vanishing inside a clinch, or while tight against the other fighter, means the pose
+            # model merged the two of them - not a fall
+            if clinch[max(0, g0 - 15):min(F, g1 + 15)].any():
+                continue
+            near = dist[max(0, g0 - 30):g0]  # last second they were both visible
+            if not np.isnan(near).all() and np.nanmin(near) < MERGE_DIST:
+                continue
+            # vanishing at the side of the frame means leaving the shot, not going down
+            xs_before = A.K[max(0, g0 - 8):g0, :, 0]
+            if not np.isnan(xs_before).all() and FRAME_W:
+                x_last = np.nanmean(xs_before)
+                if x_last < 0.08 * FRAME_W or x_last > 0.92 * FRAME_W:
+                    continue
             # going down: pose spreads out (horizontal) or hips drop, just before vanishing
             pre_asp = np.nanmax(aspect[g0 - 8:g0]) if not np.isnan(aspect[g0 - 8:g0]).all() else 0
             pre_drop = (np.nanmax(A.hip[g0 - 8:g0, 1]) - np.nanmin(A.hip[g0 - 8:g0, 1])) / A.s[g0 - 1] \
@@ -537,7 +599,14 @@ def detect_falls(B, strikes, clinch, dist, fps, F):
             low_back = (np.nanmedian(back) < 0.6) if not np.isnan(back).all() else False
             if low_back and (pre_asp > 0.5 or pre_drop > 0.4):
                 rr.append((g0, g1))
-        down[n] = sorted(r for r in rr if in_round(r[0], fps) is not None)
+        def at_edge(a):  # half out of frame at the side: legs cut off look like crouching
+            xs = A.K[max(0, a - 8):a + 4, :, 0]
+            if np.isnan(xs).all() or not FRAME_W:
+                return False
+            x = np.nanmean(xs)
+            return x < 0.08 * FRAME_W or x > 0.92 * FRAME_W
+
+        down[n] = sorted(r for r in rr if in_round(r[0], fps) is not None and not at_edge(r[0]))
     falls = []
     for n in NAMES:
         other = NAMES[1 - NAMES.index(n)]
@@ -633,6 +702,29 @@ def clinch_from_labels(label_files, F, fps):
     return clinch, out, ctrl
 
 
+KD_POS = re.compile(r"\bknock(?:ed)?[ -]?down\b")
+KD_NEG = re.compile(r"\b(?:no|not|without)\s+(?:a\s+)?(?:\w+\s+)?knock(?:ed)?[ -]?down|no fall")
+
+
+def merge_labelled_knockdowns(falls, label_files, fps):
+    """Knockdowns the labellers saw become falls credited to the fighter they name; any
+    pose-detected fall within 4 s of one is replaced by it (the labels saw the cause)."""
+    kds = []
+    for lf in label_files:
+        for e in json.load(open(lf)).get("events", []):
+            note = (e.get("note") or "").lower()
+            att = str(e.get("attacker", "")).upper()
+            if att not in NAMES or KD_NEG.search(note):
+                continue
+            if KD_POS.search(note):
+                if any(abs(e["t"] - k["t"]) < 4 * fps for k in kds):
+                    continue
+                kds.append({"t": int(e["t"]), "end": int(e["t"] + fps), "who": NAMES[1 - NAMES.index(att)],
+                            "cause": "knockdown", "credit": att, "round": in_round(e["t"], fps)})
+    kept = [f for f in falls if all(abs(f["t"] - k["t"]) >= 4 * fps for k in kds)]
+    return sorted(kept + kds, key=lambda f: f["t"])
+
+
 # ---------------------------------------------------------------- 5. stats
 KIND = {"teep": "kick", "elbow": "punch"}  # fold rarer strikes into the HUD's three columns
 
@@ -666,7 +758,10 @@ def summarise(strikes, falls, clinch, segs, ctrl, fwd, fps):
                 "head_snaps": sum(bool(e.get("snap")) for e in ld),
                 "clinch_control_share": round(float(c.sum() / tot), 2) if tot else None,
                 "forward_pressure_share": round(float(fwd[n][fa:fb].sum() / fw_tot), 2) if fw_tot else None,
-                "dumps_scored": sum(1 for f in falls if f["round"] == r and f["credit"] == n),
+                "dumps_scored": sum(1 for f in falls if f["round"] == r and f["credit"] == n
+                                    and f["cause"] != "knockdown"),
+                "knockdowns_scored": sum(1 for f in falls if f["round"] == r and f["credit"] == n
+                                         and f["cause"] == "knockdown"),
                 "times_down": sum(1 for f in falls if f["round"] == r and f["who"] == n),
             }
         rounds.append(rs)
@@ -680,7 +775,7 @@ def score_round(rs):
         x = rs[n]
         k = x["landed_by_kind"]
         p = k["punch"] * 1.0 + k["kick"] * 1.6 + k["knee"] * 1.4 + x["head_snaps"] * 1.5
-        p += x["dumps_scored"] * 3.0
+        p += x["dumps_scored"] * 3.0 + x.get("knockdowns_scored", 0) * 6.0
         p += 4.0 * (x["clinch_control_share"] or 0.5) * min(rs["clinch_seconds"], 40) / 40
         p += 3.0 * (x["forward_pressure_share"] or 0.5)
         pts[n] = round(p, 1)
@@ -814,6 +909,7 @@ def render(video, out, B, strikes, falls, clinch, ctrl, fwd, fps, F, rounds_summ
             age = i - f["t"]
             if 0 <= age < 50:
                 msg = {"dump/sweep": f"DUMP / SWEEP  -  {f['credit']} scores",
+                       "knockdown": f"KNOCKDOWN  -  {f['credit']} scores",
                        "knockdown?": f"KNOCKDOWN?  -  {f['credit']}",
                        "both went down": "BOTH FIGHTERS DOWN",
                        "slip": f"{f['who']} SLIPS"}[f["cause"]]
@@ -939,7 +1035,11 @@ def main():
     cam = camera_motion(args.video, F)
     print(f"camera drift range x {cam[:, 0].min():.0f}..{cam[:, 0].max():.0f}px")
     app_cache = args.tracks.replace(".pkl", f"_app_{cfg.appearance_key()}.pkl")
-    K = assign_fighters(frames, appearance(args.video, frames, app_cache))
+    lab_path = cfg.path("labels", "track_labels.json")
+    track_labels = json.load(open(lab_path)) if os.path.exists(lab_path) else None
+    if track_labels:
+        print(f"using {len(track_labels)} labelled tracks from {lab_path}")
+    K = assign_fighters(frames, appearance(args.video, frames, app_cache), track_labels)
     pickle.dump(K, open(os.path.join(os.path.dirname(args.tracks), "K.pkl"), "wb"))  # used by the label/review tools
     B = {n: Body(K[n], cam) for n in NAMES}
     for n in NAMES:
@@ -986,7 +1086,11 @@ def main():
             print(f"clinch review applied: {clinch.sum() / fps:.0f}s of clinch, control now from your answers only")
         for n in NAMES:  # no forward pressure while clinched
             fwd[n][clinch] = 0.0
+    global FRAME_W
+    FRAME_W = (d.get("size") or (0, 0))[0] or int(cv2.VideoCapture(args.video).get(3))
     falls = detect_falls(B, strikes, clinch, dist, fps, F)
+    if args.labels:
+        falls = merge_labelled_knockdowns(falls, args.labels, fps)
     summary = summarise(strikes, falls, clinch, segs, ctrl, fwd, fps)
     pts = [score_round(rs) for rs in summary]
 

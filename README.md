@@ -108,11 +108,32 @@ Everything specific to one video and bout lives in one JSON file
 | `camera` | A sentence describing the framing. It goes into the labelling prompt. |
 | `rounds` | `[[start, end], ...]` in seconds of the *prepared clip*. Scrub the clip to find them. |
 | `fighters[]` | Exactly two. `id` (used everywhere, e.g. `RED`), a `description` for the labelling prompt, and `draw_bgr` (overlay colour). `torso` / `legs` are lists of OpenCV HSV ranges (`h` 0–179, `s` and `v` 0–255) matched against the upper body and lower legs (e.g. shin guards). An optional `weights` (`torso`, `legs`, `other_torso`) controls how identity is scored. |
+| `fighters[].shorts` | Optional HSV ranges for the hips/thighs. The useful signal when both fighters are bare-chested. |
+| `ring` | Optional `{"polygon": [[x, y], ...], "margin": 15}`: the canvas outline in clip pixels. Only people whose feet are inside can be fighters. Only for a camera that doesn't move or zoom. |
 | `ignore` | Who the labeller should ignore: referee, corners, spectators, other rings. |
 | `official_result` | Optional. Shown on the final card for comparison. |
 
 Tip for colour ranges: the analysis caches colour features per signature, so it's cheap to iterate.
 Check identity with `debug_strikes.py`, or render a short `--range`.
+
+### When colour isn't enough: label the tracks
+
+Sometimes colour can't separate the fighters from everyone else: bare-chested fighters, a
+referee or corner team whose clothes match skin under venue lighting, a camera that zooms. Then
+label tracks instead of frames. `make_track_sheet.py` shows each long track at its start, middle
+and end. Write `<workdir>/labels/track_labels.json`:
+
+```json
+{"3": "ignore", "565": "BLUE", "29": [["KHAKI", 7.8, 22], ["ignore", 27.5, 40.2], ["BLUE", 40.5, 42]]}
+```
+
+- **A plain label** covers the whole track. `"ignore"` means that person is never a fighter.
+- **A list of `[label, from_s, to_s]`** covers a track the tracker swapped partway through.
+- **`analyze.py` uses them first.** Unlabelled fragments still go through the colour scoring.
+
+Label the longest tracks first. Then check which unlabelled tracks the identity step actually
+used: `analyze.CHOSEN_IDS` records the track picked for each fighter in every frame. Label those
+next. On a 5-minute bout, about 45 labels took identity from roughly two-thirds correct to nearly all.
 
 ## Labelling with any vision model
 
@@ -162,7 +183,7 @@ and in our test the model's control calls were close to random.
 
 ## Repository layout
 
-- **Scripts:** `prepare_video.py`, `track.py`, `analyze.py`, `make_strips.py`, `label_strips.py`,
+- **Scripts:** `prepare_video.py`, `track.py`, `make_track_sheet.py`, `analyze.py`, `make_strips.py`, `label_strips.py`,
   `merge_labels.py`, `make_review.py`, `make_clinch_review.py`, `apply_review.py`, `debug_strikes.py`
 - **Shared modules:**
   - `fightconfig.py`: config loading
