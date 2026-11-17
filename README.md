@@ -135,6 +135,18 @@ Label the longest tracks first. Then check which unlabelled tracks the identity 
 used: `analyze.CHOSEN_IDS` records the track picked for each fighter in every frame. Label those
 next. On a 5-minute bout, about 45 labels took identity from roughly two-thirds correct to nearly all.
 
+### Referee rulings
+
+The labeller can't see a foul: a knee to the groin that drops a fighter looks like a knockdown.
+Overrule it in `<workdir>/labels/rulings.json` (times in seconds of the prepared clip):
+
+```json
+[{"t": 141.4, "cause": "foul", "by": "BLUE", "note": "knee to the groin", "strike_t": 139.8}]
+```
+
+The fall within 4 s of `t` becomes an unscored foul, and `by`'s strike nearest `strike_t` scores
+nothing.
+
 ## Labelling with any vision model
 
 `label_strips.py` sends a few windows per request and gets back JSON that matches a fixed schema.

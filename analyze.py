@@ -18,6 +18,7 @@ import subprocess
 from collections import defaultdict
 
 import cv2
+import fightconfig
 import numpy as np
 
 NOSE, L_EYE, R_EYE, L_EAR, R_EAR = 0, 1, 2, 3, 4
@@ -725,6 +726,31 @@ def merge_labelled_knockdowns(falls, label_files, fps):
     return sorted(kept + kds, key=lambda f: f["t"])
 
 
+def apply_rulings(falls, strikes, rulings, fps):
+    """Human rulings on what the labels got wrong, from <workdir>/labels/rulings.json, e.g.
+    [{"t": 141.4, "cause": "foul", "by": "BLUE", "note": "knee to the groin", "strike_t": 139.8}]
+    (times in seconds of the prepared clip). A foul turns the fall within 4 s of t into an
+    unscored stoppage, and the strike by `by` nearest strike_t (within 1 s) scores nothing."""
+    for ru in rulings:
+        t = fightconfig.parse_time(ru["t"]) * fps
+        if ru.get("cause") != "foul":
+            continue
+        by = ru["by"]
+        near = [f for f in falls if abs(f["t"] - t) < 4 * fps]
+        falls[:] = [f for f in falls if f not in near]
+        falls.append({"t": int(near[0]["t"] if near else t), "end": int((near[0]["end"] if near else t + fps)),
+                      "who": NAMES[1 - NAMES.index(by)], "cause": "foul", "credit": None, "fouled_by": by,
+                      "note": ru.get("note", ""), "round": in_round(t, fps)})
+        falls.sort(key=lambda f: f["t"])
+        if ru.get("strike_t") is not None:
+            st = fightconfig.parse_time(ru["strike_t"]) * fps
+            cand = [e for e in strikes if e["by"] == by and abs(e["t"] - st) <= fps]
+            if cand:
+                e = min(cand, key=lambda e: abs(e["t"] - st))
+                e.update(foul=True, landed=False, p_land=0.0, outcome="foul", note=ru.get("note", e.get("note", "")))
+    return falls
+
+
 # ---------------------------------------------------------------- 5. stats
 KIND = {"teep": "kick", "elbow": "punch"}  # fold rarer strikes into the HUD's three columns
 
@@ -912,7 +938,8 @@ def render(video, out, B, strikes, falls, clinch, ctrl, fwd, fps, F, rounds_summ
                        "knockdown": f"KNOCKDOWN  -  {f['credit']} scores",
                        "knockdown?": f"KNOCKDOWN?  -  {f['credit']}",
                        "both went down": "BOTH FIGHTERS DOWN",
-                       "slip": f"{f['who']} SLIPS"}[f["cause"]]
+                       "slip": f"{f['who']} SLIPS",
+                       "foul": f"FOUL by {f.get('fouled_by')}  -  {f.get('note') or 'no score'}".upper()}[f["cause"]]
                 c = COL[f["credit"]] if f["credit"] else (230, 230, 230)
                 cv2.rectangle(img, (W // 2 - 260, 60), (W // 2 + 260, 104), (0, 0, 0), -1)
                 txt(img, msg, (W // 2 - 240, 92), 0.85, c, 2)
@@ -1091,6 +1118,11 @@ def main():
     falls = detect_falls(B, strikes, clinch, dist, fps, F)
     if args.labels:
         falls = merge_labelled_knockdowns(falls, args.labels, fps)
+    rul_path = cfg.path("labels", "rulings.json")
+    if os.path.exists(rul_path):
+        rulings = json.load(open(rul_path))
+        falls = apply_rulings(falls, strikes, rulings, fps)
+        print(f"applied {len(rulings)} ruling(s) from {rul_path}")
     summary = summarise(strikes, falls, clinch, segs, ctrl, fwd, fps)
     pts = [score_round(rs) for rs in summary]
 
